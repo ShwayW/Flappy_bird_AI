@@ -170,6 +170,7 @@ class Pipe(GameObject):
         :return: None
         """
         self.height = random.randrange(50, 450)
+        self.height = 250
         self.top = self.height - self.PIPE_TOP.get_height()
         self.bottom = self.height + self.GAP
 

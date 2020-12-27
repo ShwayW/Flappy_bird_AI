@@ -50,12 +50,11 @@ class StateActionValueTable(object):
 				f.write(line + '\n')
 
 class State(object):
-	def __init__(self, bird = None, pipe = None, value_tuple = None, state_size = 50):
+	def __init__(self, bird = None, pipe = None, value_tuple = None, state_size = 1):
 		if value_tuple is not None:
-			print(value_tuple)
-			self.pipe_to_bird = int(value_tuple[0] / state_size)
-			self.pipetop_to_bird = int(value_tuple[1] / state_size)
-			self.pipebot_to_bird = int(value_tuple[2] / state_size)
+			self.pipe_to_bird = int(int(value_tuple[0]) / state_size)
+			self.pipetop_to_bird = int(int(value_tuple[1]) / state_size)
+			self.pipebot_to_bird = int(int(value_tuple[2]) / state_size)
 		else:
 			self.pipe_to_bird = int((pipe.x - bird.x) / state_size)
 			self.pipetop_to_bird = int((pipe.top - bird.height) / state_size)
@@ -84,11 +83,14 @@ class Game(object):
 	def __init__(self, path):
 		self.game_window = GameWindow()
 		self.game_speed = 30
+		self.bird = Bird(230,350)
+		self.base = Base(FLOOR)
+		self.pipes = [Pipe(700)]
 		# choose to let the game play it self or play the game:
-		self.auto = True
+		self.auto = False
 		self.train = True
 		# the AI stuff:
-		self.agent = Q_Learning_Agent(alpha = 0.3, gamma = 0.5)
+		self.agent = Q_Learning_Agent(alpha = 1, gamma = 0.5)
 		self.savt = StateActionValueTable(path) # here loads the data
 		self.cur_state = None
 		self.cur_action = None
@@ -104,9 +106,9 @@ class Game(object):
 			# Records for AI:
 			episodes = 0
 			for _ in range(501):
-				bird = Bird(230,350)
-				base = Base(FLOOR)
-				pipes = [Pipe(700)]
+				self.bird = Bird(230,350)
+				self.base = Base(FLOOR)
+				self.pipes = [Pipe(700)]
 				score = 0
 				clock = pygame.time.Clock()
 				run = True
@@ -114,7 +116,7 @@ class Game(object):
 				episodes += 1
 				ret_accum = 0
 				# save training result every 500 episodes:
-				if episodes % 500 == 0:
+				if episodes % 100 == 0:
 					print('saving data......')
 					self.savt.safe_data()
 					print('data saved!')
@@ -123,87 +125,88 @@ class Game(object):
 				else:
 					self.agent.epsilon = 0
 				''' Initialize S '''
-				for pipe in pipes:
+				for pipe in self.pipes:
 					if not pipe.passed:
-						self.cur_state = State(bird, pipe)
+						self.cur_state = State(self.bird, pipe)
 						break
+				frame = 0
+				frame_k = 20
 				while run:
 					clock.tick(self.game_speed)
 					pipe_ind = 0
-					bird.move()
+					# one game frame:
+					self.bird.move()
+					self.base.move()
+					rem = []
+					add_pipe = False
+					for pipe in self.pipes:
+						pipe.move()
+						# check for collision
+						if pipe.collide(self.bird, win):
+							run = False
+						if pipe.x + pipe.PIPE_TOP.get_width() < 0:
+							rem.append(pipe)
+						if not pipe.passed and pipe.x < self.bird.x:
+							pipe.passed = True
+							add_pipe = True
+					if add_pipe:
+						score += 1
+						self.ret += 1000 # reward 1000 for every pipe past
+						self.pipes.append(Pipe(WIN_WIDTH))
+					for r in rem:
+						self.pipes.remove(r)
+					if self.bird.y + self.bird.img.get_height() - 10 >= FLOOR or self.bird.y < -50:
+						run = False
+					self.game_window.draw_window(WIN, self.bird, self.pipes, self.base, score, pipe_ind)
+
+
+					# if the game is manual:
 					if not self.auto:
 						for event in pygame.event.get():
 							if event.type == pygame.QUIT:
 								game = False
 								break
 							if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
-								bird.jump()
+								self.bird.jump()
 								self.cur_action = JUMP
 							else:
 								self.cur_action = NOTHING
-					''' Choose A from S using policy derived from Q (epsilon greedy) '''
-					if self.cur_state not in self.savt.content:
-						if not self.auto:
-							print('not in')
-						action_set = {JUMP:0, NOTHING:0}
-						self.savt.content[self.cur_state] = action_set
-						if self.auto:
-							self.cur_action = self.agent.selectAction(action_set)
-					else:
-						if not self.auto:
-							print(self.savt.content[self.cur_state])
-						else:
-							self.cur_action = self.agent.selectAction(self.savt.content[self.cur_state])
-					''' Take action A, observe R, S' '''
-					self.ret = 0
-					if self.cur_action == JUMP:
-						bird.jump()
-					base.move()
 
-					rem = []
-					add_pipe = False
-					for pipe in pipes:
-						pipe.move()
-						# check for collision
-						if pipe.collide(bird, win):
-							run = False
-						if pipe.x + pipe.PIPE_TOP.get_width() < 0:
-							rem.append(pipe)
-						if not pipe.passed and pipe.x < bird.x:
-							pipe.passed = True
-							add_pipe = True
-					if add_pipe:
-						score += 1
-						self.ret += 100 # reward 100 for every pipe past
-						pipes.append(Pipe(WIN_WIDTH))
-					for r in rem:
-						pipes.remove(r)
-					if bird.y + bird.img.get_height() - 10 >= FLOOR or bird.y < -50:
-						run = False
-					# Select next action:
-					for pipe in pipes:
-						if not pipe.passed:
-							self.next_state = State(bird, pipe)
-					if self.next_state not in self.savt.content:
-						action_set = {JUMP:0, NOTHING:0}
-						self.savt.content[self.next_state] = action_set
-						self.next_action = self.agent.selectAction(action_set)
-					else:
-						self.next_action = self.agent.selectAction(self.savt.content[self.next_state])
-					# if run is False, the bird is dead:
-					if run == False:
-						self.ret -= 1000 # -1000 rewards for dying.
-					else:
-						self.ret += 1 # reward 1 for every moment lived
-					''' Q(S,A) <- Q(S,A) + alpha * [R + gamma * max_a(Q(S',a)) - Q(S,A)] '''
-					self.agent.updateActionValue(self.savt, self.cur_state, self.cur_action, self.next_state, self.next_action, self.ret)
-					''' S <- S' '''
-					self.cur_state = self.next_state
-					self.game_window.draw_window(WIN, bird, pipes, base, score, pipe_ind)
-					ret_accum += self.ret
-				print('episode ' + str(episodes) + ' got reward: ' + str(ret_accum))
 		pygame.quit()
 		quit()
+
+	def agent_play(self):
+		''' Choose A from S using policy derived from Q (epsilon greedy) '''
+		if self.cur_state not in self.savt.content:
+			if not self.auto:
+				print('not in')
+			action_set = {JUMP:0, NOTHING:0}
+			self.savt.content[self.cur_state] = action_set
+			if self.auto:
+				self.cur_action = self.agent.selectAction(action_set)
+		else:
+			if not self.auto:
+				print(self.savt.content[self.cur_state])
+			else:
+				self.cur_action = self.agent.selectAction(self.savt.content[self.cur_state])
+		''' Take action A, observe R, S' '''
+		self.ret = 0
+		if self.cur_action == JUMP:
+			self.bird.jump()
+		# Select next action:
+		for pipe in self.pipes:
+			if not pipe.passed:
+				self.next_state = State(self.bird, pipe)
+		if self.next_state not in self.savt.content:
+			action_set = {JUMP:0, NOTHING:0}
+			self.savt.content[self.next_state] = action_set
+			self.next_action = self.agent.selectAction(action_set)
+		else:
+			self.next_action = self.agent.selectAction(self.savt.content[self.next_state])
+		''' Q(S,A) <- Q(S,A) + alpha * [R + gamma * max_a(Q(S',a)) - Q(S,A)] '''
+		self.agent.updateActionValue(self.savt, self.cur_state, self.cur_action, self.next_state, self.next_action, self.ret)
+		''' S <- S' '''
+		self.cur_state = self.next_state
 
 def main():
 	Game('./rl_train_result/bird_memory.txt').game_loop()

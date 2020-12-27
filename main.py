@@ -5,8 +5,6 @@ Datetime: 2020/12/8
 import time
 from rl_agents import *
 from util import *
-import tensorflow as tf
-print(tf.__version__)
 
 class StateActionValueTable(object):
 	def __init__(self, path):
@@ -52,15 +50,16 @@ class StateActionValueTable(object):
 				f.write(line + '\n')
 
 class State(object):
-	def __init__(self, bird = None, pipe = None, value_tuple = None):
+	def __init__(self, bird = None, pipe = None, value_tuple = None, state_size = 50):
 		if value_tuple is not None:
-			self.pipe_to_bird = value_tuple[0]
-			self.pipetop_to_bird = value_tuple[1]
-			self.pipebot_to_bird = value_tuple[2]
+			print(value_tuple)
+			self.pipe_to_bird = int(value_tuple[0] / state_size)
+			self.pipetop_to_bird = int(value_tuple[1] / state_size)
+			self.pipebot_to_bird = int(value_tuple[2] / state_size)
 		else:
-			self.pipe_to_bird = pipe.x - bird.x
-			self.pipetop_to_bird = pipe.top - bird.height
-			self.pipebot_to_bird = pipe.bottom - bird.height
+			self.pipe_to_bird = int((pipe.x - bird.x) / state_size)
+			self.pipetop_to_bird = int((pipe.top - bird.height) / state_size)
+			self.pipebot_to_bird = int((pipe.bottom - bird.height) / state_size)
 
 	def serialize(self):
 		serial = str(self.pipe_to_bird) + ','
@@ -81,76 +80,21 @@ class State(object):
 			return NotImplemented
 		return other.serialize() != self.serialize()
 
-class Hypothesis(object):
-	def __init__(self, value_tuple = None):
-		if value_tuple is not None:
-			self.W = np.array([value_tuple[0], value_tuple[1], value_tuple[2]], dtype = np.float32)
-		else:
-			self.W = np.array([0, 0, 0], dtype = np.float32)
-		self.b = np.array([0], dtype = np.float32)
-		# transform np to tf variables
-		self.weight = tf.Variable(self.W, dtype = tf.float32, trainable = True)
-		self.bias = tf.Variable(self.b, dtype = tf.float32, trainable = True)
-		self.output_act = tf.nn.relu # activation function for the output layer
-
-	@tf.function
-	def forward(self, x):
-		"""
-		param x: input in the shape of a column vector
-		"""
-		# transform x to tensorflow object:
-		h = tf.cast(x, dtype = tf.float32)
-		z = tf.matmul(self.weight, h) + self.bias
-		o = self.output_act(z)
-		return o
-
-	@tf.function
-	def measure_loss(self, target, prediction):
-		"""
-		param target: array of target values
-		param prediction: array of predictions
-		"""
-		target = tf.cast(target, dtype = tf.float32)
-		return tf.reduce_mean(tf.pow(tf.subtract(target, prediction), 2))
-
-	@tf.function
-	def compute_gradient(self, observation, target):
-		"""
-		param observation: input to the network
-		param target: target value
-		"""
-		with tf.GradientTape() as tape:
-			pred = self.forward(observation)
-			error = self.measure_loss(target, pred)
-			gradients = tape.gradient(error, self.weight + self.bias)
-		return gradients # gradients[0] is dError_dW and gradients[1] is dError_db
-
-	@tf.function
-	def apply_gradient(self, ws, bs, ws_grads, bs_grads, stepsize = 0.001):
-		"""
-		param ws: weights of the network
-		param bs: bias of the network
-		param ws_grads: gradients of the weights of the network
-		param bs_grads: gradients of the biases of the network
-		param stepsize: stepsize parameter of the GD
-		"""
-		for i in range(len(ws)):
-			assert isinstance(ws[i], tf.Variable)
-			ws[i].assign_add(-stepsize * ws_grads[i])
-		for i in range(len(bs)):
-			assert isinstance(bs[i], tf.Variable)
-			bs[i].assign_add(-stepsize * bs_grads[i])
-
-
 class Game(object):
 	def __init__(self, path):
 		self.game_window = GameWindow()
 		self.game_speed = 30
 		# choose to let the game play it self or play the game:
-		self.auto = False
-		self.train = False
-		# the SL stuff:
-		self.hypothesis = Hypothesis()
+		self.auto = True
+		self.train = True
+		# the AI stuff:
+		self.agent = Q_Learning_Agent(alpha = 0.3, gamma = 0.5)
+		self.savt = StateActionValueTable(path) # here loads the data
+		self.cur_state = None
+		self.cur_action = None
+		self.ret = 0
+		self.next_state = None
+		self.next_action = None
 
 	def game_loop(self):
 		global WIN
@@ -159,69 +103,107 @@ class Game(object):
 			game = True
 			# Records for AI:
 			episodes = 0
-			# train for k episodes:
-			k = 501
-			for _ in range(k):
-				bird = Bird(230,350) # bird initial spot
+			for _ in range(501):
+				bird = Bird(230,350)
 				base = Base(FLOOR)
-				pipes = [Pipe(700)] # pipe initial spot
+				pipes = [Pipe(700)]
 				score = 0
 				clock = pygame.time.Clock()
 				run = True
+				# one more episode:
+				episodes += 1
+				ret_accum = 0
+				# save training result every 500 episodes:
+				if episodes % 500 == 0:
+					print('saving data......')
+					self.savt.safe_data()
+					print('data saved!')
+				if self.train:
+					self.agent.epsilon = 1 / episodes
+				else:
+					self.agent.epsilon = 0
 				''' Initialize S '''
 				for pipe in pipes:
 					if not pipe.passed:
 						self.cur_state = State(bird, pipe)
 						break
 				while run:
-					run, score = self.episode(clock, bird, base, pipes, win, run, score)
+					clock.tick(self.game_speed)
+					pipe_ind = 0
+					bird.move()
+					if not self.auto:
+						for event in pygame.event.get():
+							if event.type == pygame.QUIT:
+								game = False
+								break
+							if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+								bird.jump()
+								self.cur_action = JUMP
+							else:
+								self.cur_action = NOTHING
+					''' Choose A from S using policy derived from Q (epsilon greedy) '''
+					if self.cur_state not in self.savt.content:
+						if not self.auto:
+							print('not in')
+						action_set = {JUMP:0, NOTHING:0}
+						self.savt.content[self.cur_state] = action_set
+						if self.auto:
+							self.cur_action = self.agent.selectAction(action_set)
+					else:
+						if not self.auto:
+							print(self.savt.content[self.cur_state])
+						else:
+							self.cur_action = self.agent.selectAction(self.savt.content[self.cur_state])
+					''' Take action A, observe R, S' '''
+					self.ret = 0
+					if self.cur_action == JUMP:
+						bird.jump()
+					base.move()
+
+					rem = []
+					add_pipe = False
+					for pipe in pipes:
+						pipe.move()
+						# check for collision
+						if pipe.collide(bird, win):
+							run = False
+						if pipe.x + pipe.PIPE_TOP.get_width() < 0:
+							rem.append(pipe)
+						if not pipe.passed and pipe.x < bird.x:
+							pipe.passed = True
+							add_pipe = True
+					if add_pipe:
+						score += 1
+						self.ret += 100 # reward 100 for every pipe past
+						pipes.append(Pipe(WIN_WIDTH))
+					for r in rem:
+						pipes.remove(r)
+					if bird.y + bird.img.get_height() - 10 >= FLOOR or bird.y < -50:
+						run = False
+					# Select next action:
+					for pipe in pipes:
+						if not pipe.passed:
+							self.next_state = State(bird, pipe)
+					if self.next_state not in self.savt.content:
+						action_set = {JUMP:0, NOTHING:0}
+						self.savt.content[self.next_state] = action_set
+						self.next_action = self.agent.selectAction(action_set)
+					else:
+						self.next_action = self.agent.selectAction(self.savt.content[self.next_state])
+					# if run is False, the bird is dead:
+					if run == False:
+						self.ret -= 1000 # -1000 rewards for dying.
+					else:
+						self.ret += 1 # reward 1 for every moment lived
+					''' Q(S,A) <- Q(S,A) + alpha * [R + gamma * max_a(Q(S',a)) - Q(S,A)] '''
+					self.agent.updateActionValue(self.savt, self.cur_state, self.cur_action, self.next_state, self.next_action, self.ret)
+					''' S <- S' '''
+					self.cur_state = self.next_state
+					self.game_window.draw_window(WIN, bird, pipes, base, score, pipe_ind)
+					ret_accum += self.ret
+				print('episode ' + str(episodes) + ' got reward: ' + str(ret_accum))
 		pygame.quit()
 		quit()
-
-	def episode(self, clock, bird, base, pipes, win, run, score):
-		clock.tick(self.game_speed)
-		pipe_ind = 0
-		bird.move()
-		if not self.auto: # if the game mode is set to manual:
-			for event in pygame.event.get():
-				if event.type == pygame.QUIT:
-					game = False
-					break
-				if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
-					bird.jump()
-					self.cur_action = JUMP
-				else:
-					self.cur_action = NOTHING
-
-		if self.cur_action == JUMP:
-			bird.jump()
-		base.move()
-
-		rem = []
-		add_pipe = False
-		for pipe in pipes:
-			pipe.move()
-			# check for collision
-			if pipe.collide(bird, win):
-				run = False
-				break
-			if pipe.x + pipe.PIPE_TOP.get_width() < 0:
-				rem.append(pipe)
-			if not pipe.passed and pipe.x < bird.x:
-				pipe.passed = True
-				add_pipe = True
-		if add_pipe:
-			score += 1
-			pipes.append(Pipe(WIN_WIDTH))
-		for r in rem:
-			pipes.remove(r)
-		if bird.y + bird.img.get_height() - 10 >= FLOOR or bird.y < -50:
-			run = False
-		if run == False:
-
-			print("here")
-		self.game_window.draw_window(WIN, bird, pipes, base, score, pipe_ind)
-		return (run, score)
 
 def main():
 	Game('./rl_train_result/bird_memory.txt').game_loop()

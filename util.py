@@ -255,7 +255,6 @@ class Base(GameObject):
 
 
 class GameWindow(object):
-
     def __init__(self):
         pygame.display.set_caption("Flappy Bird")
 

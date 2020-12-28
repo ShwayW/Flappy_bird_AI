@@ -87,14 +87,13 @@ class Game(object):
 		self.base = Base(FLOOR)
 		self.pipes = [Pipe(700)]
 		# choose to let the game play it self or play the game:
-		self.auto = False
+		self.auto = True
 		self.train = True
 		# the AI stuff:
 		self.agent = Q_Learning_Agent(alpha = 1, gamma = 0.5)
 		self.savt = StateActionValueTable(path) # here loads the data
 		self.cur_state = None
 		self.cur_action = None
-		self.ret = 0
 		self.next_state = None
 		self.next_action = None
 
@@ -151,14 +150,12 @@ class Game(object):
 							add_pipe = True
 					if add_pipe:
 						score += 1
-						self.ret += 1000 # reward 1000 for every pipe past
 						self.pipes.append(Pipe(WIN_WIDTH))
 					for r in rem:
 						self.pipes.remove(r)
 					if self.bird.y + self.bird.img.get_height() - 10 >= FLOOR or self.bird.y < -50:
 						run = False
 					self.game_window.draw_window(WIN, self.bird, self.pipes, self.base, score, pipe_ind)
-
 
 					# if the game is manual:
 					if not self.auto:
@@ -172,10 +169,16 @@ class Game(object):
 							else:
 								self.cur_action = NOTHING
 
+					# The agent plays the game:
+					ret_accum += self.agent_play(frame, frame_k, run)
+					# increase the frame by 1:
+					frame += 1
+
+				print("episode " + str(episodes) + " got reward " + str(ret_accum))
 		pygame.quit()
 		quit()
 
-	def agent_play(self):
+	def agent_play(self, frame, frame_k, run):
 		''' Choose A from S using policy derived from Q (epsilon greedy) '''
 		if self.cur_state not in self.savt.content:
 			if not self.auto:
@@ -190,7 +193,7 @@ class Game(object):
 			else:
 				self.cur_action = self.agent.selectAction(self.savt.content[self.cur_state])
 		''' Take action A, observe R, S' '''
-		self.ret = 0
+		ret = 0
 		if self.cur_action == JUMP:
 			self.bird.jump()
 		# Select next action:
@@ -204,9 +207,10 @@ class Game(object):
 		else:
 			self.next_action = self.agent.selectAction(self.savt.content[self.next_state])
 		''' Q(S,A) <- Q(S,A) + alpha * [R + gamma * max_a(Q(S',a)) - Q(S,A)] '''
-		self.agent.updateActionValue(self.savt, self.cur_state, self.cur_action, self.next_state, self.next_action, self.ret)
+		self.agent.updateActionValue(self.savt, self.cur_state, self.cur_action, self.next_state, self.next_action, ret)
 		''' S <- S' '''
 		self.cur_state = self.next_state
+		return ret
 
 def main():
 	Game('./rl_train_result/bird_memory.txt').game_loop()
